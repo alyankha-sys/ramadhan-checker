@@ -1,1 +1,2 @@
-python main.py
+run:
+  cmd: python main.py
