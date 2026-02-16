@@ -13,7 +13,13 @@ from database import init_db, simpan_laporan
 from badge import cek_badge
 from scheduler import ranking_job, reminder_job, export_job
 
-logging.basicConfig(level=logging.INFO)
+# =========================
+# Logging
+# =========================
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
 # =========================
 # Flask & Telegram Setup
@@ -22,7 +28,7 @@ app = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 # =========================
-# POINT SYSTEM
+# Point System
 # =========================
 def hitung_poin(data):
     return (
@@ -47,33 +53,41 @@ def parse_laporan(text):
         if "=" in line:
             key, value = line.split("=")
             key = key.strip().lower()
-            if key in data:
-                try:
-                    data[key] = int(value.strip())
-                except ValueError:
-                    data[key] = 0
+            try:
+                data[key] = int(value.strip())
+            except:
+                data[key] = 0
     return data
 
 # =========================
-# MESSAGE HANDLER
+# Telegram Message Handler
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        if not update.message or not update.message.text:
+            return
+
         text = update.message.text
         user_id = update.message.from_user.id
-        username = update.message.from_user.username or str(user_id)  # fallback pakai user_id
+        username = update.message.from_user.username or str(user_id)  # fallback user_id
 
         logging.info(f"Pesan diterima dari {username}: {text}")
 
-        if HASHTAG in text.lower():
+        if HASHTAG.lower() in text.lower():
             data = parse_laporan(text)
             total = hitung_poin(data)
             simpan_laporan(username, data, total)
 
             reply_text = f"Laporan diterima ✅ Total poin: {total}"
-            await update.message.reply_text(reply_text)
 
+            # Pastikan bot bisa reply di grup / private
+            chat_type = update.message.chat.type
+            if chat_type in ["private", "group", "supergroup"]:
+                await update.message.reply_text(reply_text)
+
+            # Cek badge
             await cek_badge(username, context.bot, GROUP_ID)
+
     except Exception as e:
         logging.exception("Error handle_message")
 
@@ -82,14 +96,16 @@ telegram_app.add_handler(
 )
 
 # =========================
-# FLASK WEBHOOK (synchronous)
+# Flask Webhook (Synchronous)
 # =========================
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     try:
         update_json = request.get_json(force=True)
+        logging.info(f"Webhook diterima: {update_json}")
         update = Update.de_json(update_json, telegram_app.bot)
-        # jalankan async bot di event loop
+
+        # Jalankan async handler di event loop
         asyncio.run_coroutine_threadsafe(
             telegram_app.process_update(update),
             asyncio.get_event_loop()
@@ -104,10 +120,12 @@ def home():
     return "Bot is running"
 
 # =========================
-# MAIN FUNCTION
+# Main Function
 # =========================
 async def main():
+    # Init DB
     init_db()
+    logging.info("Database initialized")
 
     # Scheduler
     scheduler = AsyncIOScheduler(timezone="Asia/Jakarta")
@@ -115,18 +133,22 @@ async def main():
     scheduler.add_job(reminder_job, "cron", hour=18, minute=0, args=[telegram_app])
     scheduler.add_job(export_job, "cron", hour=4, minute=5, args=[telegram_app])
     scheduler.start()
+    logging.info("Scheduler started")
 
     # Start Telegram bot
     await telegram_app.initialize()
     await telegram_app.start()
+    logging.info("Telegram bot started")
 
     # Jalankan Flask di thread terpisah
     def run_flask():
         port = int(os.environ.get("PORT", 8080))
         app.run(host="0.0.0.0", port=port)
-    Thread(target=run_flask).start()
 
-    # Biar loop tetap jalan
+    Thread(target=run_flask).start()
+    logging.info("Flask server running in thread")
+
+    # Keep loop running
     try:
         while True:
             await asyncio.sleep(1)
@@ -136,6 +158,7 @@ async def main():
         scheduler.shutdown()
 
 if __name__ == "__main__":
-    # Pastikan ada event loop untuk asyncio.run_coroutine_threadsafe
-    loop = asyncio.get_event_loop()
+    # Pastikan ada event loop sebelum Telegram handler dijalankan
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     asyncio.run(main())
