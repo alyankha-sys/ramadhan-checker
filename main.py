@@ -1,6 +1,8 @@
 import logging
 import os
 import asyncio
+from threading import Thread
+
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -13,24 +15,26 @@ from scheduler import ranking_job, reminder_job, export_job
 
 logging.basicConfig(level=logging.INFO)
 
+# =========================
+# Flask & Telegram Setup
+# =========================
 app = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 # =========================
 # POINT SYSTEM
 # =========================
-
 def hitung_poin(data):
     return (
-        data["subuh"] * 5 +
-        data["dzuhur"] * 5 +
-        data["ashar"] * 5 +
-        data["maghrib"] * 5 +
-        data["isya"] * 5 +
-        data["tadarus"] * 3 +
-        data["sedekah"] * 4 +
-        data["qiyamul"] * 6 +
-        data["puasa"] * 10
+        data.get("subuh",0) * 5 +
+        data.get("dzuhur",0) * 5 +
+        data.get("ashar",0) * 5 +
+        data.get("maghrib",0) * 5 +
+        data.get("isya",0) * 5 +
+        data.get("tadarus",0) * 3 +
+        data.get("sedekah",0) * 4 +
+        data.get("qiyamul",0) * 6 +
+        data.get("puasa",0) * 10
     )
 
 def parse_laporan(text):
@@ -44,49 +48,64 @@ def parse_laporan(text):
             key, value = line.split("=")
             key = key.strip().lower()
             if key in data:
-                data[key] = int(value.strip())
+                try:
+                    data[key] = int(value.strip())
+                except ValueError:
+                    data[key] = 0
     return data
 
 # =========================
-# HANDLE MESSAGE
+# MESSAGE HANDLER
 # =========================
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    username = update.message.from_user.username
+    try:
+        text = update.message.text
+        user_id = update.message.from_user.id
+        username = update.message.from_user.username or str(user_id)  # fallback pakai user_id
 
-    if not username:
-        return
+        logging.info(f"Pesan diterima dari {username}: {text}")
 
-    if HASHTAG in text:
-        data = parse_laporan(text)
-        total = hitung_poin(data)
-        simpan_laporan(username, data, total)
-        await update.message.reply_text(f"Laporan diterima ✅ Total poin: {total}")
-        await cek_badge(username, context.bot, GROUP_ID)
+        if HASHTAG in text.lower():
+            data = parse_laporan(text)
+            total = hitung_poin(data)
+            simpan_laporan(username, data, total)
+
+            reply_text = f"Laporan diterima ✅ Total poin: {total}"
+            await update.message.reply_text(reply_text)
+
+            await cek_badge(username, context.bot, GROUP_ID)
+    except Exception as e:
+        logging.exception("Error handle_message")
 
 telegram_app.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
 )
 
 # =========================
-# WEBHOOK ROUTE
+# FLASK WEBHOOK (synchronous)
 # =========================
-
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    await telegram_app.process_update(update)
-    return "ok"
+def webhook():
+    try:
+        update_json = request.get_json(force=True)
+        update = Update.de_json(update_json, telegram_app.bot)
+        # jalankan async bot di event loop
+        asyncio.run_coroutine_threadsafe(
+            telegram_app.process_update(update),
+            asyncio.get_event_loop()
+        )
+        return "ok"
+    except Exception as e:
+        logging.exception("Webhook gagal")
+        return "ok"
 
 @app.route("/")
 def home():
     return "Bot is running"
 
 # =========================
-# MAIN
+# MAIN FUNCTION
 # =========================
-
 async def main():
     init_db()
 
@@ -97,24 +116,26 @@ async def main():
     scheduler.add_job(export_job, "cron", hour=4, minute=5, args=[telegram_app])
     scheduler.start()
 
-    # Jalankan Telegram bot
+    # Start Telegram bot
     await telegram_app.initialize()
     await telegram_app.start()
 
-    # Flask di thread terpisah supaya tidak blocking asyncio
-    from threading import Thread
+    # Jalankan Flask di thread terpisah
     def run_flask():
         port = int(os.environ.get("PORT", 8080))
         app.run(host="0.0.0.0", port=port)
     Thread(target=run_flask).start()
 
-    # Biar event loop tetap jalan
+    # Biar loop tetap jalan
     try:
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
+        logging.info("Shutting down bot & scheduler...")
         await telegram_app.stop()
         scheduler.shutdown()
 
 if __name__ == "__main__":
+    # Pastikan ada event loop untuk asyncio.run_coroutine_threadsafe
+    loop = asyncio.get_event_loop()
     asyncio.run(main())
