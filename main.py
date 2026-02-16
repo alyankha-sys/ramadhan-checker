@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -86,14 +87,34 @@ def home():
 # MAIN
 # =========================
 
-if __name__ == "__main__":
+async def main():
     init_db()
 
+    # Scheduler
     scheduler = AsyncIOScheduler(timezone="Asia/Jakarta")
     scheduler.add_job(ranking_job, "cron", hour=4, minute=0, args=[telegram_app])
     scheduler.add_job(reminder_job, "cron", hour=18, minute=0, args=[telegram_app])
     scheduler.add_job(export_job, "cron", hour=4, minute=5, args=[telegram_app])
     scheduler.start()
 
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # Jalankan Telegram bot
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+    # Flask di thread terpisah supaya tidak blocking asyncio
+    from threading import Thread
+    def run_flask():
+        port = int(os.environ.get("PORT", 8080))
+        app.run(host="0.0.0.0", port=port)
+    Thread(target=run_flask).start()
+
+    # Biar event loop tetap jalan
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        await telegram_app.stop()
+        scheduler.shutdown()
+
+if __name__ == "__main__":
+    asyncio.run(main())
