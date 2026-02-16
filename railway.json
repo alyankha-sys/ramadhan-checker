@@ -1,7 +1,6 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "deploy": {
-    "numReplicas": 1,
-    "sleepApplication": false
+    "startCommand": "python main.py"
   }
 }
